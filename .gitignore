@@ -1,0 +1,53 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+*.egg-info/
+*.egg
+*.log
+
+# Node / JS
+node_modules/
+dist/
+build/
+
+# LaTeX
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.run.xml
+_minted*
+latexmkrc
+
+# Data & binaries
+*.zip
+*.tar.gz
+*.7z
+*.rar
+*.pdf
+*.csv
+*.xlsx
+*.ods
+*.sqlite
+*.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VSCode / IDE
+.vscode/
+.idea/
