@@ -1,53 +1,29 @@
-# OS files
+# OS & editor
 .DS_Store
 Thumbs.db
+*.swp
 
 # Python
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
 .venv/
+venv/
 env/
-*.egg-info/
-*.egg
-*.log
 
-# Node / JS
-node_modules/
-dist/
-build/
-
-# LaTeX
-*.aux
-*.log
-*.out
-*.toc
-*.synctex.gz
-*.bbl
-*.bcf
-*.blg
-*.fdb_latexmk
-*.fls
-*.run.xml
-_minted*
-latexmkrc
-
-# Data & binaries
-*.zip
-*.tar.gz
-*.7z
-*.rar
-*.pdf
-*.csv
-*.xlsx
-*.ods
-*.sqlite
-*.db
-
-# Jupyter
+# Quarto/Jupyter caches
+.quarto/
+.qmd-cache/
 .ipynb_checkpoints/
 
-# VSCode / IDE
-.vscode/
-.idea/
+# Built site (Actions will publish; don't commit it)
+_site/
+
+# Generated analysis outputs (reproducible; don't version)
+outputs/
+*.csv
+*.png
+*.pdf
+
+# Keep tiny curated images used by posts (optional)
+!posts/img/**
+!lifetime-PD-AKF/posts/img/**
