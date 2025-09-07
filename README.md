@@ -29,7 +29,7 @@ This repository contains materials related to my research in:
 
 ## 🗂 Repository Structure
 
-
+```bash
 research-lab/
 │
 ├─ lifetime-PD-AKF/          # Example project: Lifetime Probability of Default with Anchored Kalman Filter
@@ -42,7 +42,7 @@ research-lab/
 │
 ├─ README.md                 # You are here
 └─ .gitignore
-
+````
 
 
 Each folder corresponds to a **published paper, working paper, or research project**.  
