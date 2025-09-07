@@ -93,10 +93,10 @@ This repository supports the following works (growing list):
 
 **Dr. Vahab Rostampour**
 
-* Senior Quantitative Analyst (UBS, Credit Suisse, ABN AMRO)
+* Senior Quantitative Analyst at top tier banks
 * PhD in Applied Mathematics & Control Systems Engineering 
 * Senior Quantitative Researcher (ETH Zürich)
-* Expertise in **quantitative risk management, optimisation, and AI applications**
+* Expertise in **quantitative risk management, control systems engineering, optimisation, and AI applications**
 
 Website: [vahabr.github.io](https://vahabr.github.io)
 LinkedIn: [linkedin.com/in/vrostampour](https://linkedin.com/in/vrostampour)
