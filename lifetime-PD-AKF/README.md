@@ -136,6 +136,10 @@ If using this code in academic work:
 ```
 Rostampour, V. (2025). Stabilising Lifetime PD Models under Forecast Uncertainty.  
 GitHub repository: https://github.com/research-lab/lifetime-PD-AKF
+
+[![DOI](https://zenodo.org/badge/1047823828.svg)](https://doi.org/10.5281/zenodo.17072772)
+
+
 ```
 
 
