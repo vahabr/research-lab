@@ -29,7 +29,6 @@ This repository contains materials related to my research in:
 
 ## 🗂 Repository Structure
 
-```
 
 research-lab/
 │
@@ -44,17 +43,17 @@ research-lab/
 ├─ README.md                 # You are here
 └─ .gitignore
 
-````
+
 
 Each folder corresponds to a **published paper, working paper, or research project**.  
 Inside you’ll find the paper sources, reproducible code, and slides when available.
 
----
+
 
 ## 🚀 How to Reproduce
 
 1. Clone the repo:
-   ```bash
+```bash
    git clone https://github.com/vahabr/research-lab.git
    cd research-lab
 ````
