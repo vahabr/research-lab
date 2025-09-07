@@ -1,0 +1,8 @@
+[submodule "books"]
+	branch = main
+[submodule "opttera"]
+	branch = main
+[submodule "vahabr.github.io"]
+	branch = main
+[submodule "zwmco"]
+	branch = main
