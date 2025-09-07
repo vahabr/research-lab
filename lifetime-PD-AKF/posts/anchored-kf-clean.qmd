@@ -1,0 +1,514 @@
+---
+title: "Anchored Kalman Filtering in a Markov PD Model — Reproducible Demo"
+format:
+  html:
+    code-tools: true
+    thebe: true       # readers click ▶ Run to execute in-browser via Binder
+execute:
+  enabled: false      # IMPORTANT: do not execute during GitHub build
+jupyter: python3
+---
+
+
+## Overview
+
+This page demonstrates **anchored Kalman filtering** inside a **Markov credit rating (PD) model**, with three scenarios (baseline, stress, pandemic).
+Each section explains the idea, then shows the code. When you click **Run**, figures are shown **inline** and also saved under `outputs/`.
+
+---
+
+## 0) Imports & Output Path
+
+```{python}
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from pathlib import Path
+from typing import List, Dict, Tuple
+import zlib  # for stable seed offsets
+
+# Save all generated files here (portable for local & Binder)
+OUTDIR = Path("outputs")
+OUTDIR.mkdir(parents=True, exist_ok=True)
+OUTDIR.resolve()
+```
+
+---
+
+## 1) Ratings Universe & Determinism
+
+```{python}
+RATINGS = ["A", "B", "C", "D"]
+IDX = {r: i for i, r in enumerate(RATINGS)}
+T_DEFAULT = 20
+N_DEFAULT = 10_000
+
+def set_seed(seed: int) -> np.random.Generator:
+    """Set global determinism and return a local RNG."""
+    np.random.seed(seed)
+    return np.random.default_rng(seed)
+
+# Example: a reproducible RNG to reuse
+rng = set_seed(42)
+rng
+```
+
+---
+
+## 2) Initial Portfolio
+
+```{python}
+def gen_initial_portfolio(N: int, pi0: np.ndarray, rng: np.random.Generator=None) -> np.ndarray:
+    """Sample initial ratings for N obligors from cross-sectional distribution pi0."""
+    rng = rng or np.random.default_rng()
+    return rng.choice(len(RATINGS), size=N, p=pi0)
+
+# Demo share check
+pi0_demo = np.array([0.50, 0.35, 0.10, 0.05], dtype=float)
+labels0_demo = gen_initial_portfolio(N_DEFAULT, pi0_demo, rng=rng)
+(pd.Series(labels0_demo)
+   .map({i:r for r,i in IDX.items()})
+   .value_counts(normalize=True)
+   .rename("share")
+   .to_frame()
+   .sort_index())
+```
+
+---
+
+## 3) TTC Transition Matrix (Quarterly, D absorbing)
+
+```{python}
+def build_P_TTC() -> np.ndarray:
+    P_TTC = np.array([
+        [0.975, 0.022, 0.002, 0.001],
+        [0.030, 0.935, 0.030, 0.005],
+        [0.010, 0.060, 0.915, 0.015],
+        [0.000, 0.000, 0.000, 1.000],
+    ], dtype=float)
+    return P_TTC
+
+P_TTC = build_P_TTC()
+assert np.allclose(P_TTC.sum(axis=1), 1.0), "Rows must sum to 1"
+P_TTC
+```
+
+**Visualise & save**
+
+```{python}
+fig, ax = plt.subplots(figsize=(4.5, 3.5))
+im = ax.imshow(P_TTC, aspect="auto")
+ax.set_xticks(range(len(RATINGS))); ax.set_xticklabels(RATINGS)
+ax.set_yticks(range(len(RATINGS))); ax.set_yticklabels(RATINGS)
+ax.set_title("Quarterly TTC Transition Matrix")
+fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+f_ttc = OUTDIR / "ttc_matrix.png"
+fig.savefig(f_ttc, bbox_inches="tight")
+plt.show(); f_ttc
+```
+
+---
+
+## 4) Scenarios & Macro Index
+
+**Idea:** Build stylised GDP & unemployment **forecasts** and **realisations**, then compute a z-scored macro index
+$M_t = 0.5\,z(\text{GDP}_t) - 0.5\,z(\text{UNEMP}_t)$.
+
+```{python}
+def _baseline_paths(T: int) -> Tuple[np.ndarray, np.ndarray]:
+    t = np.arange(T)
+    return 0.5 + 0.3*np.sin(2*np.pi*t/12), 5.0 + 0.2*np.cos(2*np.pi*(t+3)/10)
+
+def _stress_paths(T: int) -> Tuple[np.ndarray, np.ndarray]:
+    t = np.arange(T)
+    gdp = 0.6 - 0.8*np.exp(-t/2.0); gdp[:4] -= 0.8
+    un  = 4.5 + 1.8*(1 - np.exp(-t/4.0))
+    return gdp, un
+
+def _pandemic_paths(T: int) -> Tuple[np.ndarray, np.ndarray]:
+    t = np.arange(T)
+    gdp = 0.5*np.ones(T); gdp[0:2] = -2.0; gdp[2] = -0.5
+    un  = 4.2*np.ones(T); un[0:3] = 5.5; un[3:6] = 5.0
+    return gdp, un
+
+def macro_index_from_gdp_unemp(GDP: np.ndarray, UNEMP: np.ndarray) -> np.ndarray:
+    def z(x):
+        mu, sd = np.mean(x), np.std(x, ddof=0)
+        sd = sd if sd > 1e-12 else 1.0
+        return (x - mu)/sd
+    return 0.5*z(GDP) - 0.5*z(UNEMP)
+
+def gen_macro_forecasts_and_realised(scenario: str, T: int=T_DEFAULT, rng: np.random.Generator=None) -> Dict[str, np.ndarray]:
+    rng = rng or np.random.default_rng()
+    sc = scenario.lower()
+    if sc == "baseline": gdp_f, un_f = _baseline_paths(T)
+    elif sc == "stress": gdp_f, un_f = _stress_paths(T)
+    elif sc in {"pandemic","pandemic_shock"}: gdp_f, un_f = _pandemic_paths(T)
+    else: raise ValueError("Unknown scenario")
+    # Realisations = forecast + noise
+    gdp_r = gdp_f + rng.normal(0.0, 0.2, size=T)
+    un_r  = un_f  + rng.normal(0.0, 0.2, size=T)
+    if sc in {"pandemic","pandemic_shock"} and T >= 4:
+        gdp_r[3] += 2.5; un_r[3] -= 0.8
+    M_hat  = macro_index_from_gdp_unemp(gdp_f, un_f)
+    M_real = macro_index_from_gdp_unemp(gdp_r, un_r)
+    return {"gdp_forecast": gdp_f, "unemp_forecast": un_f,
+            "gdp_realised": gdp_r, "unemp_realised": un_r,
+            "M_hat": M_hat, "M_real": M_real}
+```
+
+**Quick visual check**
+
+```{python}
+scenarios = ["baseline", "stress", "pandemic"]
+fig, axes = plt.subplots(3, 2, figsize=(10, 8), sharex=True)
+for i, sc in enumerate(scenarios):
+    res = gen_macro_forecasts_and_realised(sc, T=20, rng=rng)
+    axes[i,0].plot(res["gdp_forecast"], label="Forecast"); axes[i,0].plot(res["gdp_realised"], label="Realised", alpha=0.7)
+    axes[i,0].set_title(f"{sc.title()} GDP"); axes[i,0].legend()
+    axes[i,1].plot(res["unemp_forecast"], label="Forecast"); axes[i,1].plot(res["unemp_realised"], label="Realised", alpha=0.7)
+    axes[i,1].set_title(f"{sc.title()} Unemployment")
+plt.tight_layout()
+f_macro = OUTDIR / "macro_scenarios_overview.png"
+plt.savefig(f_macro, bbox_inches="tight")
+plt.show(); f_macro
+```
+
+---
+
+## 5) PIT Overlay (Logit Tilt of TTC by Macro)
+
+```{python}
+def _build_betas() -> np.ndarray:
+    beta = np.zeros((4,4), dtype=float)
+    # downgrades/defaults
+    beta[IDX["A"], IDX["B"]] = 2.0; beta[IDX["A"], IDX["C"]] = 2.5; beta[IDX["A"], IDX["D"]] = 3.0
+    beta[IDX["B"], IDX["C"]] = 1.5; beta[IDX["B"], IDX["D"]] = 2.0
+    beta[IDX["C"], IDX["D"]] = 1.2
+    # upgrades as negatives
+    beta[IDX["B"], IDX["A"]] = -beta[IDX["A"], IDX["B"]]
+    beta[IDX["C"], IDX["B"]] = -beta[IDX["B"], IDX["C"]]
+    beta[IDX["C"], IDX["A"]] = -beta[IDX["A"], IDX["C"]]
+    return beta
+
+def pit_overlay(P_TTC: np.ndarray, M_t: float, betas: np.ndarray) -> np.ndarray:
+    W = P_TTC * np.exp(betas * M_t)
+    for i in range(W.shape[0]):
+        if i == IDX["D"]:
+            W[i,:] = 0.0; W[i, IDX["D"]] = 1.0
+        else:
+            s = W[i,:].sum()
+            W[i,:] = P_TTC[i,:] if (s<=0 or not np.isfinite(s)) else (W[i,:]/s)
+    return W
+
+# Demo: A-row response to macro
+betas = _build_betas()
+mvals = [-1.0, 0.0, 1.0]
+fig, ax = plt.subplots(figsize=(6,3))
+for mv in mvals:
+    W = pit_overlay(P_TTC, mv, betas)
+    ax.plot(W[IDX["A"], :], marker="o", label=f"M={mv:+.1f}")
+ax.set_xticks(range(4)); ax.set_xticklabels(RATINGS)
+ax.set_title("A-row PIT probabilities vs macro index")
+ax.legend()
+f_pitA = OUTDIR / "pit_row_A_vs_M.png"
+plt.savefig(f_pitA, bbox_inches="tight")
+plt.show(); f_pitA
+```
+
+---
+
+## 6) Kalman Filters (Naïve vs Anchored)
+
+```{python}
+def kalman_naive(M_hat: np.ndarray, rho: float=0.90, Q: float=None, R: float=0.25) -> np.ndarray:
+    T = len(M_hat)
+    if Q is None: Q = 1 - rho**2
+    m, P, H = 0.0, 1.0, 1.0
+    m_filt = np.zeros(T)
+    for t in range(T):
+        # predict
+        m_pred = rho*m; P_pred = rho*P*rho + Q
+        # update
+        y = M_hat[t]; S = H*P_pred*H + R; K = P_pred*H / S
+        m = m_pred + K*(y - H*m_pred); P = (1 - K*H)*P_pred
+        m_filt[t] = m
+    return m_filt
+
+def kalman_anchored(M_hat: np.ndarray, T_anchor: int=20, rho: float=0.90, Q: float=None, R: float=0.25, sigma_star2_pre: float=0.25) -> np.ndarray:
+    T = len(M_hat)
+    if Q is None: Q = 1 - rho**2
+    m, P = 0.0, 1.0
+    H = np.array([[1.0],[1.0]])  # stacked obs
+    m_filt = np.zeros(T)
+    for t in range(T):
+        m_pred = rho*m; P_pred = rho*P*rho + Q
+        y = np.array([M_hat[t], 0.0])
+        R_aug = np.diag([R, sigma_star2_pre]) if t < T_anchor else np.diag([R, 1e-12])
+        S = H @ np.array([[P_pred]]) @ H.T + R_aug
+        K = (np.array([[P_pred]]) @ H.T) @ np.linalg.solve(S, np.eye(2))
+        innov = y - (H[:,0]*m_pred)
+        m = m_pred + (K @ innov)[0]
+        P = (1 - (K @ H)[0,0]) * P_pred
+        m_filt[t] = m
+    return m_filt
+
+# Demo compare on baseline
+demo = gen_macro_forecasts_and_realised("baseline", T=40, rng=rng)
+Mhat_demo = demo["M_hat"]
+m_naive  = kalman_naive(Mhat_demo, rho=0.9, R=0.25)
+m_anchor = kalman_anchored(Mhat_demo, T_anchor=20, rho=0.9, R=0.25, sigma_star2_pre=0.25)
+
+fig, ax = plt.subplots(figsize=(8, 4))
+ax.plot(Mhat_demo, label="Forecast $M^\\hat{}_t$", alpha=0.6)
+ax.plot(m_naive,  label="Naïve KF $m_t$")
+ax.plot(m_anchor, label="Anchored KF $m_t$")
+ax.axvline(20, ls="--", alpha=0.6, label="Anchor switch")
+ax.set_title("Kalman Filters on Forecast Macro Index (Baseline)")
+ax.legend()
+f_kf = OUTDIR / "kf_naive_vs_anchored.png"
+plt.savefig(f_kf, bbox_inches="tight")
+plt.show(); f_kf
+```
+
+---
+
+## 7) Propagation & PD Series
+
+```{python}
+def propagate_distribution(pi0: np.ndarray, P_ts: List[np.ndarray]) -> np.ndarray:
+    T = len(P_ts)
+    pi = np.zeros((T+1, len(RATINGS))); pi[0,:] = pi0; cur = pi0.copy()
+    for t in range(T):
+        cur = cur @ P_ts[t]
+        pi[t+1,:] = cur
+    return pi
+
+def compute_pd_series(pi_ts: np.ndarray) -> np.ndarray:
+    return pi_ts[:, IDX["D"]]
+
+# Demo one step under TTC
+pi_one = propagate_distribution(pi0_demo, [P_TTC.copy()])
+pd.Series(pi_one[-1], index=RATINGS).rename("π_1")
+```
+
+---
+
+## 8) Experiment (Scenario × Method)
+
+```{python}
+def _stable_offset(scenario: str, method: str, mod: int = 10_000) -> int:
+    return zlib.crc32(f"{scenario}|{method}".encode()) % mod
+
+def run_experiment(scenario: str, method: str, N: int=N_DEFAULT, T: int=T_DEFAULT, seed: int=12345) -> Dict[str, object]:
+    rng = set_seed(seed + _stable_offset(scenario, method))
+    pi0 = np.array([0.45, 0.40, 0.15, 0.00], dtype=float)
+    P_TTC = build_P_TTC(); betas = _build_betas()
+
+    macro = gen_macro_forecasts_and_realised(scenario, T=T, rng=rng)
+    M_hat, M_real = macro["M_hat"], macro["M_real"]
+
+    if method == "raw":
+        M_est = M_real.copy()
+    elif method == "naive":
+        M_est = kalman_naive(M_hat, rho=0.90, Q=None, R=0.25)
+    elif method == "anchored":
+        M_est = kalman_anchored(M_hat, T_anchor=T, rho=0.90, Q=None, R=0.25, sigma_star2_pre=0.25)
+    else:
+        raise ValueError("Unknown method")
+
+    P_ts = [pit_overlay(P_TTC, float(M_est[t]), betas) for t in range(T)]
+    pi_ts = propagate_distribution(pi0, P_ts)
+    Y_t   = compute_pd_series(pi_ts)
+
+    # TTC baseline
+    pi_ttc = propagate_distribution(pi0, [P_TTC.copy() for _ in range(T)])
+    Y_ttc  = compute_pd_series(pi_ttc)
+
+    # Save CSVs
+    tm_rows = [{"t":t+1,"from":RATINGS[i],"to":RATINGS[j],"P":P_ts[t][i,j]} for t in range(T) for i in range(4) for j in range(4)]
+    df_tm = pd.DataFrame(tm_rows); f_tm = OUTDIR / f"transition_matrices_{scenario}_{method}.csv"; df_tm.to_csv(f_tm, index=False)
+    df_macro = pd.DataFrame({"t":np.arange(1,T+1),"M_forecast":M_hat,"M_realised":M_real,"M_estimate":M_est})
+    f_macro = OUTDIR / f"macro_paths_{scenario}_{method}.csv"; df_macro.to_csv(f_macro, index=False)
+    df_pd = pd.DataFrame({"t":np.arange(0,T+1),"Y_t":Y_t,"Y_ttc":Y_ttc})
+    f_pd = OUTDIR / f"pd_term_structures_{scenario}_{method}.csv"; df_pd.to_csv(f_pd, index=False)
+
+    # Macro figure (show + save)
+    fig = plt.figure(figsize=(7,3.5))
+    tt = np.arange(1, T+1)
+    plt.plot(tt, M_hat, label="Forecast (M̂)")
+    plt.plot(tt, M_real, label="Realised M")
+    plt.plot(tt, M_est, label=f"Estimate: {method}")
+    plt.axhline(0.0, color="k", lw=0.7, alpha=0.4)
+    plt.xlabel("Quarter"); plt.ylabel("Macro index (z)"); plt.title(f"Macro filter: {scenario} × {method}"); plt.legend()
+    f_fig = OUTDIR / f"macro_filter_{scenario}_{method}.png"
+    fig.savefig(f_fig, bbox_inches="tight"); plt.show()
+
+    return {"P_ts": P_ts, "pi_ts": pi_ts, "Y_t": Y_t, "Y_ttc": Y_ttc,
+            "M_hat": M_hat, "M_real": M_real, "M_est": M_est,
+            "files": {"transition_matrices": str(f_tm), "macro_paths": str(f_macro), "pd_term_structures": str(f_pd), "macro_figure": str(f_fig)}}
+```
+
+---
+
+## 9) PD Bands & Variance (By Method)
+
+```{python}
+def variance_across_scenarios(Y_by_scn: Dict[str, np.ndarray]) -> pd.DataFrame:
+    Ys = np.stack(list(Y_by_scn.values()), axis=0)
+    return pd.DataFrame({"t": np.arange(Ys.shape[1]), "var_Y_t": Ys.var(axis=0, ddof=0)})
+
+# Run three scenarios for "anchored"
+scenarios = ["baseline", "stress", "pandemic"]; method = "anchored"; T_demo = 20
+results = {sc: run_experiment(sc, method=method, T=T_demo, seed=2025) for sc in scenarios}
+
+# PD bands (show + save)
+tgrid = np.arange(0, T_demo+1)
+fig, ax = plt.subplots(figsize=(8, 4))
+any_key = next(iter(results))
+ax.plot(tgrid, results[any_key]["Y_ttc"], label="TTC baseline")
+for scn, res in results.items(): ax.plot(tgrid, res["Y_t"], label=scn)
+ax.set_xlabel("Quarter"); ax.set_ylabel("Cumulative PD (π_t[D])"); ax.set_title(f"PD term-structure bands — {method}"); ax.legend()
+f_bands = OUTDIR / f"pd_bands_{method}.png"
+fig.savefig(f_bands, bbox_inches="tight"); plt.show(); f_bands
+```
+
+**Variance across scenarios**
+
+```{python}
+var_df = variance_across_scenarios({sc: res["Y_t"] for sc, res in results.items()})
+var_df.head(10)
+```
+
+---
+
+## 10) Appendix Figures (MC Distributions)
+
+First we ensure per-scenario **MC sample CSVs** exist; then we make four figures.
+
+```{python}
+def _stable_offset_key(*parts: str, mod: int = 10_000) -> int:
+    return zlib.crc32("|".join(parts).encode()) % mod
+
+def _ensure_mc_samples_csvs(
+    outdir: Path,
+    scenarios=("baseline","stress","pandemic"),
+    methods=("raw","naive","anchored"),
+    n_rep: int = 200,
+    seed_base: int = 2025,
+    T: int = T_DEFAULT,
+    pi0: np.ndarray = np.array([0.45, 0.40, 0.15, 0.00], dtype=float),
+):
+    outdir.mkdir(parents=True, exist_ok=True)
+    P_TTC_local = build_P_TTC(); betas = _build_betas()
+    for scn in scenarios:
+        f_samples = outdir / f"mc_samples_YT_{scn}.csv"
+        if f_samples.exists(): continue
+        rng_base = set_seed(seed_base + _stable_offset_key("base", scn))
+        base = gen_macro_forecasts_and_realised(scn, T=T, rng=rng_base)
+        data: Dict[str, np.ndarray] = {}
+        for m in methods:
+            vals = []; rng_mc = np.random.default_rng(seed_base + _stable_offset_key("mc", scn, m))
+            for _ in range(n_rep):
+                gdp_f = base["gdp_forecast"]; un_f = base["unemp_forecast"]
+                gdp_r = gdp_f + rng_mc.normal(0.0, 0.2, size=T)
+                un_r  = un_f  + rng_mc.normal(0.0, 0.2, size=T)
+                if scn.lower().startswith("pandemic") and T >= 4: gdp_r[3]+=2.5; un_r[3]-=0.8
+                M_hat = macro_index_from_gdp_unemp(gdp_f, un_f)
+                M_real= macro_index_from_gdp_unemp(gdp_r, un_r)
+                if m=="raw": M_eff = M_real
+                elif m=="naive": M_eff = kalman_naive(M_hat, rho=0.90, Q=None, R=0.25)
+                elif m=="anchored": M_eff = kalman_anchored(M_hat, T_anchor=T, rho=0.90, Q=None, R=0.25, sigma_star2_pre=0.25)
+                else: raise ValueError("Unknown method")
+                P_ts = [pit_overlay(P_TTC_local, float(M_eff[t]), betas) for t in range(T)]
+                pi_ts= propagate_distribution(pi0, P_ts)
+                vals.append(pi_ts[-1, IDX["D"]])
+            data[m] = np.asarray(vals, float)
+        pd.DataFrame(data).to_csv(f_samples, index=False)
+
+_ensure_mc_samples_csvs(OUTDIR)
+```
+
+**10.1 Notched boxplots**
+
+```{python}
+scenarios = ["baseline","stress","pandemic"]; methods = ["raw","naive","anchored"]
+
+fig, axes = plt.subplots(1, 3, figsize=(15, 4), sharey=True)
+for ax, scn in zip(axes, scenarios):
+    df = pd.read_csv(OUTDIR / f"mc_samples_YT_{scn}.csv")
+    ax.boxplot([df[m] for m in methods], labels=methods, notch=True, showfliers=False)
+    ax.set_title(scn.capitalize()); ax.set_xlabel("Method")
+axes[0].set_ylabel("Lifetime PD at T")
+fig.suptitle("Notched boxplots — Lifetime PD distributions (200 MC reps)", y=1.02)
+f_box = OUTDIR / "combined_notched_boxplots_all.png"
+fig.savefig(f_box, bbox_inches="tight"); plt.show(); f_box
+```
+
+**10.2 Violin plots**
+
+```{python}
+fig, axes = plt.subplots(1, 3, figsize=(15, 4), sharey=True)
+for ax, scn in zip(axes, scenarios):
+    df = pd.read_csv(OUTDIR / f"mc_samples_YT_{scn}.csv")
+    ax.violinplot([df[m] for m in methods], showmeans=True, showmedians=True)
+    ax.set_xticks(range(1, len(methods)+1)); ax.set_xticklabels(methods)
+    ax.set_title(scn.capitalize()); ax.set_xlabel("Method")
+axes[0].set_ylabel("Lifetime PD at T")
+fig.suptitle("Violin plots — Lifetime PD distributions (200 MC reps)", y=1.02)
+f_viol = OUTDIR / "combined_violins_all.png"
+fig.savefig(f_viol, bbox_inches="tight"); plt.show(); f_viol
+```
+
+**10.3 Jittered box+dot (deterministic jitter)**
+
+```{python}
+rng_jitter = np.random.default_rng(12345)
+fig, axes = plt.subplots(1, 3, figsize=(15, 4), sharey=True)
+for ax, scn in zip(axes, scenarios):
+    df = pd.read_csv(OUTDIR / f"mc_samples_YT_{scn}.csv")
+    ax.boxplot([df[m] for m in methods], labels=methods, showfliers=False)
+    for i, m in enumerate(methods, start=1):
+        y = df[m].values
+        x = rng_jitter.normal(i, 0.06, size=len(y))
+        ax.plot(x, y, linestyle="", marker="o", alpha=0.35, markersize=3)
+    ax.set_title(scn.capitalize()); ax.set_xlabel("Method")
+axes[0].set_ylabel("Lifetime PD at T")
+fig.suptitle("Jittered box+dot — Lifetime PD distributions (200 MC reps)", y=1.02)
+f_boxdot = OUTDIR / "combined_boxdot_all.png"
+fig.savefig(f_boxdot, bbox_inches="tight"); plt.show(); f_boxdot
+```
+
+**10.4 Mean ± std bars from summary table**
+
+```{python}
+# If you ran a full main pipeline elsewhere, you already have this file.
+# If not, create a quick summary from the sample CSVs:
+def _mc_summary_from_samples(outdir: Path, scenarios, methods):
+    rows = []
+    for scn in scenarios:
+        df = pd.read_csv(outdir / f"mc_samples_YT_{scn}.csv")
+        for m in methods:
+            rows.append({"scenario": scn, "method": m, "YT_mean": float(df[m].mean()), "YT_std": float(df[m].std(ddof=0))})
+    res = pd.DataFrame(rows)
+    res.to_csv(outdir / "lifetime_loss_volatility_mc.csv", index=False)
+    return res
+
+df_mc = _mc_summary_from_samples(OUTDIR, scenarios, methods)
+
+fig, axes = plt.subplots(1, 3, figsize=(15, 4), sharey=True)
+for ax, scn in zip(axes, scenarios):
+    sub = df_mc[df_mc["scenario"] == scn].copy()
+    order = ["raw","naive","anchored"]
+    sub["method"] = pd.Categorical(sub["method"], categories=order, ordered=True)
+    sub = sub.sort_values("method")
+    x = np.arange(len(order))
+    ax.bar(x, sub["YT_mean"].values, yerr=sub["YT_std"].values, capsize=4)
+    ax.set_xticks(x); ax.set_xticklabels(order)
+    ax.set_title(scn.capitalize()); ax.set_xlabel("Method")
+axes[0].set_ylabel("Lifetime PD at T (mean ± std)")
+fig.suptitle("Lifetime PD (200 MC reps) — mean with volatility", y=1.02)
+f_bars = OUTDIR / "combined_mc_lifetime_pd_bars_all.png"
+fig.savefig(f_bars, bbox_inches="tight"); plt.show(); f_bars
+```
+

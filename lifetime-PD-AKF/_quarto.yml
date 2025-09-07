@@ -1,0 +1,26 @@
+project:
+  type: website
+
+website:
+  title: "Vahab Rostampour"
+  description: "Quantitative models, simulations, and research notes"
+  site-url: https://vahabr.github.io
+  repo-url: https://github.com/vahabr/research-lab/lifetime-PD-AKF
+  navbar:
+    right:
+      - text: Home
+        href: index.qmd
+      - text: Blog
+        href: posts/index.qmd
+      - text: About
+        href: about.qmd
+
+format:
+  html:
+    theme: cosmo
+    toc: true
+    code-tools: true
+    thebe: true
+
+execute:
+  enabled: false    # 🚨 disables execution on build (keeps Actions happy)
